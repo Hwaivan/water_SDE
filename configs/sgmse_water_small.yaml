@@ -1,0 +1,111 @@
+experiment:
+  name: sgmse_water_small
+  output_dir: runs/sgmse_water_small
+  seed: 42
+  deterministic: true
+
+data:
+  data_mode: paired
+  sample_rate: 16000
+  segment_seconds: 1.0
+  train_manifest: data/train_pairs.txt
+  valid_manifest: data/valid_pairs.txt
+  test_manifest: data/test_pairs.txt
+  noise_manifest: null
+  snr_min: -5.0
+  snr_max: 20.0
+  mono: true
+  num_workers: 0
+  segment_validation: false
+  silence_threshold: 1.0e-8
+  shared_peak_limit: null
+
+# Water-project preset: preserves the already tested DCCRN STFT parameters.
+stft:
+  n_fft: 512
+  win_length: 400
+  hop_length: 100
+  window: hann
+  center: true
+  normalized: false
+  onesided: true
+
+compression:
+  alpha: 0.5
+  beta: 0.15
+  crop_frames: 128
+
+sde:
+  T: 1.0
+  t_eps: 0.03
+  gamma: 1.5
+  sigma_min: 0.05
+  sigma_max: 0.5
+  variance_floor: 1.0e-12
+
+model:
+  name: ncsnpp
+  input_channels: 4
+  output_channels: 2
+  base_channels: 16
+  channel_multipliers: [1, 2, 2]
+  num_res_blocks: 1
+  attention_resolutions: [64]
+  image_size: 256
+  dropout: 0.0
+  fourier_scale: 16.0
+  fir_kernel: [1, 3, 3, 1]
+  skip_rescale: true
+  progressive_input: true
+  progressive_output: true
+
+sampler:
+  num_steps: 30
+  predictor: euler_maruyama
+  corrector: annealed_langevin
+  corrector_steps: 1
+  corrector_step_size: 0.5
+  use_ema: true
+
+training:
+  optimizer: adam
+  learning_rate: 1.0e-4
+  weight_decay: 0.0
+  epochs: 1
+  batch_size: 2
+  amp: true
+  gradient_clip_norm: 1.0
+  ema_decay: 0.999
+  scheduler: reduce_on_plateau
+  scheduler_factor: 0.5
+  scheduler_patience: 5
+  min_lr: 1.0e-7
+  save_every: 1
+  resume: null
+  auxiliary_waveform_weight: 0.0
+
+validation:
+  eval_interval: 1
+  max_sampling_batches: 1
+  seed: 1234
+
+metrics:
+  alignment_policy: crop
+  eps: 1.0e-8
+  min_db: null
+  max_db: null
+
+logging:
+  tensorboard: true
+  jsonl: true
+
+distributed:
+  use_ddp: true
+  data_parallel: false
+
+inference:
+  seed: 1234
+  chunk_seconds: null
+  overlap_seconds: 0.5
+  fallback_on_oom: true
+
