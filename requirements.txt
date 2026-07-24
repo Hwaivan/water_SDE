@@ -1,0 +1,10 @@
+# Compatible baseline: Python 3.8.5, PyTorch 1.11, torchaudio 0.11.
+# The implementation intentionally does not require Lightning or W&B.
+torch>=1.11
+torchaudio>=0.11
+numpy>=1.20
+PyYAML>=5.4
+soundfile>=0.10
+tensorboard>=2.2
+pytest>=7.0
+

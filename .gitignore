@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+runs/
+results/
+tmp_smoke/
+data/*.wav
+data/*.txt
