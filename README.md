@@ -126,29 +126,37 @@ sigma_min² * (r**(2t) - exp(-2*gamma*t)) /
 
 ## 训练
 
-在本目录执行：
+在本目录执行。`--num-gpus` 会决定训练模式：`0` 使用 CPU，`1` 使用单卡，
+大于 `1` 时自动启动单机 DDP，每张可见 GPU 一个进程。
 
 ```bash
-python train.py --config configs/sgmse_water_small.yaml
+python train.py --config configs/sgmse_water_small.yaml --num-gpus 1
 ```
 
-full：
+四卡 full 配置：
 
 ```bash
-python train.py --config configs/sgmse_water_full.yaml
+python train.py --config configs/sgmse_water_full.yaml --num-gpus 4
 ```
 
-DDP：
+程序只使用当前 `CUDA_VISIBLE_DEVICES` 中的前 N 张可见卡，并检查传入数量没有超过
+可见 GPU 数量。未传 `--num-gpus` 时保持旧行为：普通启动自动选择 CPU/单卡，
+`torchrun` 启动则读取其进程环境。原有 `torchrun` 用法仍受支持：
+
+DDP 下 `training.batch_size` 是每个 GPU/进程的 batch size；单机总 batch size 为
+`training.batch_size * num_gpus`。
 
 ```bash
 torchrun --nproc_per_node=4 train.py \
-  --config configs/sgmse_water_full.yaml
+  --config configs/sgmse_water_full.yaml \
+  --num-gpus 4
 ```
 
 恢复：
 
 ```bash
 python train.py --config configs/sgmse_water_full.yaml \
+  --num-gpus 4 \
   --resume runs/sgmse_water_full/checkpoints/last.pt
 ```
 

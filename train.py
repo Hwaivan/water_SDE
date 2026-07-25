@@ -1,9 +1,11 @@
 """Train SGMSE+ score model with single GPU, DataParallel, or torchrun DDP."""
 
 import argparse
+import os
 from pathlib import Path
 
 import torch
+import torch.multiprocessing as multiprocessing
 
 from sgmse.data import SGMSEDataset, build_dataloader
 from sgmse.engine import SGMSETrainer
@@ -12,6 +14,7 @@ from sgmse.utils.config import load_config
 from sgmse.utils.distributed import (
     cleanup_distributed,
     initialize_distributed,
+    resolve_training_launch,
     unwrap_model,
     wrap_model,
 )
@@ -25,13 +28,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="")
+    parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=None,
+        help=(
+            "Visible GPU count: 0=CPU, 1=single GPU, >1=single-node DDP. "
+            "When omitted, preserve automatic single-device/torchrun behavior."
+        ),
+    )
+    parser.add_argument("--master-addr", default="127.0.0.1")
+    parser.add_argument("--master-port", type=int, default=29500)
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def _run_training(
+    args: argparse.Namespace,
+    requested_device: str,
+    launch_mode: str,
+    allow_legacy_data_parallel: bool,
+) -> None:
     config = load_config(args.config)
-    context = initialize_distributed(args.device)
+    context = initialize_distributed(requested_device)
     try:
         seed = int(config["experiment"]["seed"])
         seed_everything(
@@ -63,7 +81,8 @@ def main() -> None:
         model = wrap_model(
             model,
             context,
-            bool(config["distributed"].get("data_parallel", False)),
+            allow_legacy_data_parallel
+            and bool(config["distributed"].get("data_parallel", False)),
         )
         optimizer = torch.optim.Adam(
             model.parameters(),
@@ -78,7 +97,8 @@ def main() -> None:
             min_lr=float(config["training"].get("min_lr", 1.0e-7)),
         )
         logger.info(
-            "rank=%d/%d device=%s train=%d valid=%d parameters=%d",
+            "mode=%s rank=%d/%d device=%s train=%d valid=%d parameters=%d",
+            launch_mode,
             context.rank,
             context.world_size,
             context.device,
@@ -114,6 +134,39 @@ def main() -> None:
         cleanup_distributed(context)
 
 
+def _spawn_worker(
+    local_rank: int,
+    args: argparse.Namespace,
+    world_size: int,
+) -> None:
+    """Configure one local DDP rank and enter the unchanged training routine."""
+    os.environ["MASTER_ADDR"] = str(args.master_addr)
+    os.environ["MASTER_PORT"] = str(args.master_port)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["LOCAL_WORLD_SIZE"] = str(world_size)
+    os.environ["RANK"] = str(local_rank)
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    _run_training(args, "cuda", "internal_ddp", False)
+
+
+def main() -> None:
+    args = parse_args()
+    launch = resolve_training_launch(args.num_gpus, args.device)
+    if launch.spawn:
+        multiprocessing.spawn(
+            _spawn_worker,
+            args=(args, launch.num_gpus),
+            nprocs=launch.num_gpus,
+            join=True,
+        )
+        return
+    _run_training(
+        args,
+        launch.device,
+        launch.mode,
+        args.num_gpus is None,
+    )
+
+
 if __name__ == "__main__":
     main()
-
