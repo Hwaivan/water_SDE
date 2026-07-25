@@ -29,6 +29,11 @@ data:
   data_mode: on_the_fly
   train_manifest: data/train_clean.txt
   noise_manifest: data/train_noise.txt
+  noise_mode: mixed
+  white_noise_probability: 0.2
+  white_noise_ratio: 0.3
+  snr_min: -5.0
+  snr_max: 20.0
   valid_manifest: data/valid_pairs.txt
   test_manifest: data/test_pairs.txt
 ```
@@ -44,6 +49,18 @@ noisy = clean + noise_scale * noise
 
 不会分别归一化 clean/noisy。若启用 `shared_peak_limit`，只使用一个公共系数同步缩放
 两者。静音 clean 明确报错，不静默作为正常样本。
+
+在线环境噪声支持三种模式：
+
+- `real`：只从 `noise_manifest` 读取真实噪声。
+- `white`：实时生成白高斯噪声，不需要 `noise_manifest`。
+- `mixed`：以 `white_noise_probability` 的概率使用纯白噪声，否则把单位功率
+  真实噪声和白噪声按 `white_noise_ratio` 指定的功率比例混合。
+
+`white_noise_probability` 是分支概率，`white_noise_ratio` 是进入真实噪声分支
+后的白噪声功率比例，两者含义不同。所有模式都在环境噪声构造完成后重新测量有效区
+总功率，再由 `snr_min`/`snr_max` 控制最终 clean-to-noise SNR。老配置缺少新增字段
+时默认使用 `real`、`0.0`、`0.0`。
 
 ## 复数 STFT 与数据流
 

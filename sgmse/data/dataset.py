@@ -56,6 +56,13 @@ def _shared_limit(clean: torch.Tensor, noisy: torch.Tensor, limit: Optional[floa
     return clean * gain, noisy * gain
 
 
+def _valid_power(waveform: torch.Tensor, valid_length: int) -> torch.Tensor:
+    """Mean-square power over clean-valid samples, excluding right padding."""
+    if valid_length <= 0:
+        return waveform.new_zeros(())
+    return waveform[:valid_length].square().mean()
+
+
 class SGMSEDataset(Dataset):
     """Waveform dataset preserving legacy ``noisy<TAB>clean`` manifests.
 
@@ -80,6 +87,17 @@ class SGMSEDataset(Dataset):
         )
         self.silence_threshold = float(config.get("silence_threshold", 1.0e-8))
         self.peak_limit = config.get("shared_peak_limit")
+        self.noise_mode = str(config.get("noise_mode", "real")).lower()
+        self.white_noise_probability = float(
+            config.get("white_noise_probability", 0.0)
+        )
+        self.white_noise_ratio = float(config.get("white_noise_ratio", 0.0))
+        if self.noise_mode not in ("real", "white", "mixed"):
+            raise ValueError("noise_mode must be real, white, or mixed")
+        if not 0.0 <= self.white_noise_probability <= 1.0:
+            raise ValueError("white_noise_probability must be in [0, 1]")
+        if not 0.0 <= self.white_noise_ratio <= 1.0:
+            raise ValueError("white_noise_ratio must be in [0, 1]")
         self.mode = config["data_mode"] if self.training else "paired"
         manifest_key = "{}_manifest".format(split)
         if self.mode == "paired":
@@ -89,9 +107,16 @@ class SGMSEDataset(Dataset):
         else:
             self.clean_paths = _manifest_lines(config["train_manifest"])
             noise_manifest = config.get("noise_manifest")
-            if not noise_manifest:
-                raise ValueError("on_the_fly mode requires data.noise_manifest")
-            self.noise_paths = _manifest_lines(noise_manifest)
+            if self.noise_mode in ("real", "mixed"):
+                if not noise_manifest:
+                    raise ValueError(
+                        "{} noise mode requires data.noise_manifest".format(
+                            self.noise_mode
+                        )
+                    )
+                self.noise_paths = _manifest_lines(noise_manifest)
+            else:
+                self.noise_paths = []
             self.pairs = []
 
     @staticmethod
@@ -162,23 +187,83 @@ class SGMSEDataset(Dataset):
 
     def _online(self, index: int, generator: torch.Generator) -> Dict[str, Any]:
         clean_path = self.clean_paths[index]
-        noise_index = int(torch.randint(len(self.noise_paths), (1,), generator=generator).item())
-        noise_path = self.noise_paths[noise_index]
         clean = load_audio(clean_path, self.sample_rate, self.mono)
-        noise = load_audio(noise_path, self.sample_rate, self.mono)
         target = self.segment_length
         clean_max = max(0, clean.numel() - (target or clean.numel()))
-        noise_max = max(0, noise.numel() - (target or noise.numel()))
         clean_start = int(torch.randint(clean_max + 1, (1,), generator=generator).item()) if clean_max else 0
-        noise_start = int(torch.randint(noise_max + 1, (1,), generator=generator).item()) if noise_max else 0
         clean, valid = _fit_waveform(clean, target, clean_start)
-        noise, _ = _fit_waveform(noise, target, noise_start)
-        clean_power = clean[:valid].square().mean() if valid else clean.new_zeros(())
-        noise_power = noise.square().mean()
+        clean_power = _valid_power(clean, valid)
         if clean_power <= self.silence_threshold:
             raise ValueError("Silent clean sample: {}".format(clean_path))
+
+        noise_path = "generated:white"
+        branch = self.noise_mode
+        effective_white_ratio = 0.0
+        use_pure_white = self.noise_mode == "white"
+        if self.noise_mode == "mixed":
+            use_pure_white = bool(
+                torch.rand((), generator=generator).item()
+                < self.white_noise_probability
+            )
+
+        if use_pure_white:
+            noise = torch.randn(
+                clean.shape, dtype=clean.dtype, generator=generator
+            )
+            branch = "pure_white"
+            effective_white_ratio = 1.0
+        else:
+            noise_index = int(
+                torch.randint(
+                    len(self.noise_paths), (1,), generator=generator
+                ).item()
+            )
+            noise_path = self.noise_paths[noise_index]
+            real_noise = load_audio(noise_path, self.sample_rate, self.mono)
+            noise_max = max(
+                0, real_noise.numel() - (target or real_noise.numel())
+            )
+            noise_start = (
+                int(
+                    torch.randint(
+                        noise_max + 1, (1,), generator=generator
+                    ).item()
+                )
+                if noise_max
+                else 0
+            )
+            real_noise, _ = _fit_waveform(real_noise, target, noise_start)
+            real_power = _valid_power(real_noise, valid)
+            if real_power <= self.silence_threshold:
+                raise ValueError("Silent noise sample: {}".format(noise_path))
+
+            if self.noise_mode == "mixed":
+                white_noise = torch.randn(
+                    clean.shape, dtype=clean.dtype, generator=generator
+                )
+                white_power = _valid_power(white_noise, valid)
+                real_unit = real_noise / torch.sqrt(real_power)
+                white_unit = white_noise / torch.sqrt(
+                    white_power.clamp_min(self.silence_threshold)
+                )
+                ratio = self.white_noise_ratio
+                noise = (
+                    (1.0 - ratio) ** 0.5 * real_unit
+                    + ratio ** 0.5 * white_unit
+                )
+                branch = "real_white_mix"
+                effective_white_ratio = ratio
+            else:
+                noise = real_noise
+                branch = "real"
+
+        # Samples after the clean-valid region are padding, not environment.
+        if valid < noise.numel():
+            noise = noise.clone()
+            noise[valid:] = 0.0
+        noise_power = _valid_power(noise, valid)
         if noise_power <= self.silence_threshold:
-            raise ValueError("Silent noise sample: {}".format(noise_path))
+            raise ValueError("Constructed environment noise is silent")
         snr = float(
             torch.empty(1).uniform_(
                 float(self.config["snr_min"]),
@@ -203,6 +288,9 @@ class SGMSEDataset(Dataset):
             "noisy_path": noise_path,
             "clean_path": clean_path,
             "input_snr": snr,
+            "noise_mode": self.noise_mode,
+            "noise_branch": branch,
+            "white_noise_ratio": effective_white_ratio,
         }
 
     def __getitem__(self, index: int) -> Dict[str, Any]:

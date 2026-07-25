@@ -51,6 +51,26 @@ def validate_config(config: Dict[str, Any]) -> None:
     )
     if data["data_mode"] not in ("paired", "on_the_fly"):
         raise ValueError("data.data_mode must be paired or on_the_fly")
+    # Defaults keep configurations created before waveform noise modes valid.
+    data.setdefault("noise_mode", "real")
+    data.setdefault("white_noise_probability", 0.0)
+    data.setdefault("white_noise_ratio", 0.0)
+    if data["noise_mode"] not in ("real", "white", "mixed"):
+        raise ValueError("data.noise_mode must be real, white, or mixed")
+    white_probability = float(data["white_noise_probability"])
+    white_ratio = float(data["white_noise_ratio"])
+    if not 0.0 <= white_probability <= 1.0:
+        raise ValueError("data.white_noise_probability must be in [0, 1]")
+    if not 0.0 <= white_ratio <= 1.0:
+        raise ValueError("data.white_noise_ratio must be in [0, 1]")
+    if (
+        data["data_mode"] == "on_the_fly"
+        and data["noise_mode"] in ("real", "mixed")
+        and not data.get("noise_manifest")
+    ):
+        raise ValueError(
+            "data.noise_manifest is required for real and mixed on-the-fly noise"
+        )
     if float(data["snr_min"]) > float(data["snr_max"]):
         raise ValueError("data.snr_min must not exceed data.snr_max")
     if int(data["sample_rate"]) <= 0 or float(data["segment_seconds"]) <= 0:
@@ -102,4 +122,3 @@ def load_config(path: str) -> Dict[str, Any]:
     validate_config(config)
     config["_config_path"] = str(config_path)
     return config
-
